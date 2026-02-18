@@ -35,7 +35,7 @@ const Sidebar = ({ activeTab, setActiveTab, isSidebarOpen, setIsSidebarOpen, cen
     );
 
     return (
-        <aside className={`${isSidebarOpen ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 lg:translate-x-0 lg:opacity-100'} transition-all duration-300 ease-in-out lg:flex w-72 glass m-0 lg:m-6 lg:mr-0 flex-col overflow-hidden fixed lg:relative z-50 h-screen lg:h-[calc(100vh-3rem)] sidebar-border lg:rounded-[2.5rem] shadow-2xl`}>
+        <aside className={`${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} transition-transform duration-300 ease-in-out lg:flex w-72 bg-[#050b18]/70 lg:bg-transparent glass m-0 lg:m-6 lg:mr-0 flex-col overflow-hidden fixed lg:relative z-[100] h-screen lg:h-[calc(100vh-3rem)] sidebar-border lg:rounded-[2.5rem] shadow-2xl`}>
             <div className="p-8 relative">
                 <button
                     onClick={() => setIsSidebarOpen(false)}
