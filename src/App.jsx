@@ -1,164 +1,468 @@
-import React, { useState } from 'react';
-import { Users, UserPlus, Settings, PieChart, Search, Bell, LogOut, Heart } from 'lucide-react';
-import { motion } from 'framer-motion';
+import React, { useState, useEffect } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Users, UserPlus, MessageSquare, AlertTriangle, Phone, CheckCircle, PieChart as PieChartIcon, Menu, X } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import { supabase } from './lib/supabase';
+import { sendAligoSMS } from './services/aligo';
 
-const SidebarLink = ({ icon: Icon, label, active, onClick }) => (
-    <motion.button
-        whileHover={{ x: 5 }}
-        onClick={onClick}
-        className={`w-full flex items-center gap-4 px-6 py-4 transition-all ${active ? 'bg-emerald-500/10 border-r-4 border-emerald-500 text-emerald-400' : 'text-slate-400 hover:text-slate-200'
-            }`}
-        style={{
-            background: active ? 'linear-gradient(90deg, rgba(16, 185, 129, 0.1) 0%, transparent 100%)' : 'transparent',
-            borderRight: active ? '4px solid #10b981' : 'none',
-            color: active ? '#10b981' : undefined
-        }}
-    >
-        <Icon size={20} />
-        <span className="font-semibold">{label}</span>
-    </motion.button>
-);
+// Extracted Components
+import Sidebar from './components/Sidebar';
+import Header from './components/Header';
+import BottomNav from './components/BottomNav';
+import StatsGrid from './components/StatsGrid';
+import MemberTable from './components/MemberTable';
+import StatsView from './components/StatsView';
+import AttendanceView from './components/AttendanceView';
+import SMSView from './components/SMSView';
+import SettingsView from './components/SettingsView';
+import AddMemberView from './components/AddMemberView';
+import MemberDetailModal from './components/MemberDetailModal';
+import SMSModal from './components/SMSModal';
+import NotificationModal from './components/NotificationModal';
+import BulkActionBar from './components/BulkActionBar';
 
 const App = () => {
+    // --- State Management ---
+    const [memberList, setMemberList] = useState([]);
+    const [filteredList, setFilteredList] = useState([]);
+    const [isLoading, setIsLoading] = useState(true);
     const [activeTab, setActiveTab] = useState('members');
+    const [searchTerm, setSearchTerm] = useState('');
+    const [filterType, setFilterType] = useState('all');
+    const [isSidebarOpen, setIsSidebarOpen] = useState(typeof window !== 'undefined' ? window.innerWidth > 1024 : true);
+    const [isNotifyOpen, setIsNotifyOpen] = useState(false);
+    const [selectedMember, setSelectedMember] = useState(null);
+    const [isEditingMember, setIsEditingMember] = useState(false);
+    const [editForm, setEditForm] = useState({});
+    const [isSmsOpen, setIsSmsOpen] = useState(false);
+    const [smsMessage, setSmsMessage] = useState('');
+    const [isSendingSms, setIsSendingSms] = useState(false);
+    const [selectedIds, setSelectedIds] = useState(new Set());
+    const [isUploading, setIsUploading] = useState(false);
 
-    const stats = [
-        { label: '전체 회원', value: '1,280', icon: Users, color: '#3b82f6' },
-        { label: '이번 달 신규', value: '+45', icon: UserPlus, color: '#10b981' },
-        { label: '출석률', value: '85%', icon: PieChart, color: '#f59e0b' },
-        { label: '활동 지수', value: '9.2', icon: Heart, color: '#ef4444' }
+    // Global Settings State
+    const [settings, setSettings] = useState(() => {
+        const saved = localStorage.getItem('system_settings');
+        return saved ? JSON.parse(saved) : {
+            centerName: '현존명상센터',
+            realtimeUpdate: true,
+            showPhotos: false,
+            showAdminMemo: true,
+            showSelection: true,
+            mobileNavStyle: 'drawer'
+        };
+    });
+
+    useEffect(() => {
+        localStorage.setItem('system_settings', JSON.stringify(settings));
+    }, [settings]);
+
+    // Filter/Sort State
+    const [colFilters, setColFilters] = useState({
+        name: '', phone: '', status: '', gender: '', memo: '', join_date: '', end_date: '', address: ''
+    });
+    const [activeColFilter, setActiveColFilter] = useState(null);
+    const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+
+    // SMS & Attendance State
+    const [smsLogs, setSmsLogs] = useState([]);
+    const [attendanceSearch, setAttendanceSearch] = useState('');
+    const [attendanceSearchResults, setAttendanceSearchResults] = useState([]);
+    const [todayAttendance, setTodayAttendance] = useState([]);
+
+    const [newMember, setNewMember] = useState({
+        name: '', phone: '', status: '회원', gender: '여', join_date: new Date().toISOString().split('T')[0], end_date: '', memo: '', address: ''
+    });
+
+    // --- Data Fetching ---
+    const fetchData = async () => {
+        setIsLoading(true);
+        try {
+            const { data, error } = await supabase
+                .from('members')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+            setMemberList(data || []);
+            const actual = (data || []).filter(m => !(m.memo && m.memo.includes('상담')));
+            setFilteredList(actual);
+        } catch (error) {
+            console.error('Error fetching data:', error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const fetchAttendance = async () => {
+        const today = new Date().toISOString().split('T')[0];
+        const { data, error } = await supabase
+            .from('attendance')
+            .select('*, members(name, phone)')
+            .gte('check_in_time', `${today}T00:00:00`)
+            .lte('check_in_time', `${today}T23:59:59`)
+            .order('check_in_time', { ascending: false });
+
+        if (!error) setTodayAttendance(data || []);
+    };
+
+    const fetchSmsHistory = async () => {
+        const { data } = await supabase.from('sms_logs').select('*').order('created_at', { ascending: false }).limit(20);
+        if (data) setSmsLogs(data);
+    };
+
+    useEffect(() => {
+        fetchData();
+        fetchAttendance();
+        fetchSmsHistory();
+    }, []);
+
+    // --- Handlers ---
+    const handleAddNewMember = async (e) => {
+        e.preventDefault();
+        setIsLoading(true);
+        try {
+            // Enforce Phone Formatting
+            const formattedPhone = newMember.phone.replace(/[^0-9]/g, '').replace(/^(\d{3})(\d{4})(\d{4})$/, '$1-$2-$3');
+            const { error } = await supabase.from('members').insert([{ ...newMember, phone: formattedPhone }]);
+            if (error) throw error;
+            alert('회원이 성공적으로 등록되었습니다.');
+            setNewMember({ name: '', phone: '', status: '회원', gender: '여', join_date: new Date().toISOString().split('T')[0], end_date: '', memo: '', address: '' });
+            fetchData();
+            setActiveTab('members');
+        } catch (error) {
+            alert('등록 실패: ' + error.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleUpdateMember = async () => {
+        setIsLoading(true);
+        try {
+            const formattedPhone = editForm.phone?.replace(/[^0-9]/g, '').replace(/^(\d{3})(\d{4})(\d{4})$/, '$1-$2-$3');
+            const { error } = await supabase.from('members').update({ ...editForm, phone: formattedPhone }).eq('id', selectedMember.id);
+            if (error) throw error;
+            alert('정보가 업데이트되었습니다.');
+            setIsEditingMember(false);
+            setSelectedMember(null);
+            fetchData();
+        } catch (error) {
+            alert('수정 실패: ' + error.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleDeleteMember = async () => {
+        if (!confirm('정말로 이 회원을 삭제하시겠습니까?')) return;
+        setIsLoading(true);
+        try {
+            const { error } = await supabase.from('members').delete().eq('id', selectedMember.id);
+            if (error) throw error;
+            alert('회원 정보가 삭제되었습니다.');
+            setSelectedMember(null);
+            fetchData();
+        } catch (error) {
+            alert('삭제 실패: ' + error.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleSendSms = async () => {
+        const targets = selectedMember
+            ? [selectedMember]
+            : selectedIds.size > 0
+                ? memberList.filter(m => selectedIds.has(m.id))
+                : filteredList;
+
+        if (targets.length === 0) return alert('전송 대상을 선택해주세요.');
+        if (!confirm(`${targets.length}명에게 메시지를 전송하시겠습니까?`)) return;
+
+        setIsSendingSms(true);
+        let successCount = 0;
+
+        for (const target of targets) {
+            if (!target.phone) continue;
+            try {
+                const result = await sendAligoSMS(target.phone, smsMessage);
+                if (result.row) {
+                    successCount++;
+                    await supabase.from('sms_logs').insert([{
+                        receiver: target.phone,
+                        msg: smsMessage,
+                        status: 'success'
+                    }]);
+                }
+            } catch (err) {
+                console.error('SMS Send Error:', err);
+            }
+        }
+
+        alert(`${targets.length}명 중 ${successCount}명에게 전송 완료`);
+        setIsSendingSms(false);
+        setIsSmsOpen(false);
+        setSmsMessage('');
+        setSelectedMember(null);
+        setSelectedIds(new Set());
+        fetchSmsHistory();
+    };
+
+    const handleAttendanceSearch = (term) => {
+        setAttendanceSearch(term);
+        if (term.length >= 2) {
+            const results = memberList.filter(m =>
+                m.name.includes(term) || m.phone.includes(term)
+            ).slice(0, 5);
+            setAttendanceSearchResults(results);
+        } else {
+            setAttendanceSearchResults([]);
+        }
+    };
+
+    const handleAttendanceRecord = async (memberId) => {
+        try {
+            const { error } = await supabase.from('attendance').insert([{ member_id: memberId }]);
+            if (error) throw error;
+            alert('출석 처리가 완료되었습니다.');
+            setAttendanceSearch('');
+            setAttendanceSearchResults([]);
+            fetchAttendance();
+        } catch (error) {
+            alert('출석 처리 실패: ' + error.message);
+        }
+    };
+
+    const handleDownloadExcel = () => {
+        const data = filteredList.map(m => ({
+            '이름': m.name,
+            '전화번호': m.phone,
+            '상태': m.status,
+            '성별': m.gender,
+            '맴버십 타입': m.memo,
+            '가입일': m.join_date,
+            '만기일': m.end_date,
+            '주소': m.address
+        }));
+        const ws = XLSX.utils.json_to_sheet(data);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Members");
+        XLSX.writeFile(wb, `TrueBeing_Members_${new Date().toISOString().split('T')[0]}.xlsx`);
+    };
+
+    // --- Derived State ---
+    const actualMembers = memberList.filter(m => !(m.memo && m.memo.includes('상담')));
+    const consultationMembers = memberList.filter(m => m.memo && m.memo.includes('상담'));
+
+    const realStats = [
+        { label: '전체 회원', value: actualMembers.length, color: '#10b981', icon: Users, filter: 'all' },
+        { label: '유효 회원', value: actualMembers.filter(m => ['active', '회원', '정상'].includes(m.status)).length, color: '#34d399', icon: CheckCircle, filter: 'active' },
+        {
+            label: '만기 예정', value: actualMembers.filter(m => {
+                if (!m.end_date) return false;
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const endDate = new Date(m.end_date);
+                const diff = (endDate - today) / (1000 * 60 * 60 * 24);
+                return diff >= 0 && diff <= 7;
+            }).length, color: '#fbbf24', icon: AlertTriangle, filter: 'expiring'
+        },
+        { label: '만기/마감', value: actualMembers.filter(m => m.status === '만기').length, color: '#f87171', icon: Phone, filter: 'expired' },
+        { label: '1회 수강', value: actualMembers.filter(m => m.memo && m.memo.includes('1회')).length, color: '#8b5cf6', icon: UserPlus, filter: 'one_time' },
+        { label: '지도자반', value: actualMembers.filter(m => m.memo && m.memo.includes('지도자')).length, color: '#f472b6', icon: PieChartIcon, filter: 'leadership' },
+        {
+            label: '기타/일반', value: actualMembers.filter(m => {
+                const isKnown = ['active', '회원', '정상', '만기'].includes(m.status) || (m.memo && (m.memo.includes('1회') || m.memo.includes('지도자')));
+                return !isKnown;
+            }).length, color: '#94a3b8', icon: Users, filter: 'other'
+        },
+        { label: '상담전화', value: consultationMembers.length, color: '#6366f1', icon: MessageSquare, filter: 'consultation' },
     ];
 
     return (
-        <div className="flex min-h-screen">
-            {/* Sidebar */}
-            <aside className="w-64 glass m-4 mr-0 flex flex-col overflow-hidden">
-                <div className="p-8">
-                    <h1 className="text-2xl font-bold flex items-center gap-2">
-                        <span className="gradient-text">TrueBeing</span>
-                    </h1>
-                    <p className="text-xs text-slate-500 mt-1">Management System v1.0</p>
-                </div>
+        <div className="flex min-h-screen bg-[#050b18] text-slate-200 selection:bg-emerald-500/30 font-['GmarketSansMedium'] overflow-x-hidden">
+            {/* Backdrop for Mobile Sidebar - Only if drawer style is active */}
+            <AnimatePresence>
+                {(isSidebarOpen && settings.mobileNavStyle !== 'bottom') && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        onClick={() => setIsSidebarOpen(false)}
+                        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 lg:hidden"
+                    />
+                )}
+            </AnimatePresence>
 
-                <nav className="flex-1 mt-4">
-                    <SidebarLink icon={Users} label="회원 리포트" active={activeTab === 'members'} onClick={() => setActiveTab('members')} />
-                    <SidebarLink icon={UserPlus} label="신규 등록" active={activeTab === 'add'} onClick={() => setActiveTab('add')} />
-                    <SidebarLink icon={PieChart} label="통계 분석" active={activeTab === 'stats'} onClick={() => setActiveTab('stats')} />
-                    <SidebarLink icon={Settings} label="시스템 설정" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
-                </nav>
+            {/* Sidebar Component - Hidden on mobile if bottom nav is chosen */}
+            {settings.mobileNavStyle !== 'bottom' && (
+                <Sidebar
+                    activeTab={activeTab}
+                    setActiveTab={setActiveTab}
+                    isSidebarOpen={isSidebarOpen}
+                    setIsSidebarOpen={setIsSidebarOpen}
+                    centerName={settings.centerName}
+                    settings={settings}
+                    setSettings={setSettings}
+                />
+            )}
 
-                <div className="p-6">
-                    <button className="flex items-center gap-3 text-slate-400 hover:text-red-400 transition-colors w-full px-2 py-2">
-                        <LogOut size={18} />
-                        <span className="text-sm font-medium">로그아웃</span>
-                    </button>
-                </div>
-            </aside>
+            <main className={`flex-1 min-w-0 h-screen overflow-y-auto relative p-4 lg:p-10 custom-scrollbar ${settings.mobileNavStyle === 'bottom' ? 'pb-24 lg:pb-10' : ''}`}>
+                <Header
+                    handleDownloadExcel={handleDownloadExcel}
+                    fetchData={fetchData}
+                    isLoading={isLoading}
+                    isUploading={isUploading}
+                    setIsUploading={setIsUploading}
+                    searchTerm={searchTerm}
+                    setSearchTerm={setSearchTerm}
+                    memberList={memberList}
+                    setFilteredList={setFilteredList}
+                    setFilterType={setFilterType}
+                    setIsNotifyOpen={setIsNotifyOpen}
+                    settings={settings}
+                    setIsSidebarOpen={setIsSidebarOpen}
+                />
 
-            {/* Main Content */}
-            <main className="flex-1 p-8 overflow-y-auto">
-                <header className="flex justify-between items-center mb-10">
-                    <div>
-                        <h2 className="text-3xl font-bold">회원 관리 대시보드</h2>
-                        <p className="text-slate-400 mt-1">오늘은 45명의 회원이 명상 세션에 참여했습니다.</p>
-                    </div>
-                    <div className="flex items-center gap-6">
-                        <div className="relative">
-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                            <input
-                                type="text"
-                                placeholder="회원 검색..."
-                                className="glass bg-slate-800/50 border-none pl-10 pr-4 py-2 text-sm focus:ring-2 ring-emerald-500/50 w-64 outline-none"
-                            />
-                        </div>
-                        <button className="relative p-2 glass hover:bg-slate-800 transition-colors">
-                            <Bell size={20} />
-                            <span className="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full border-2 border-slate-900"></span>
-                        </button>
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-400 to-blue-500 p-[2px]">
-                            <div className="w-full h-full rounded-xl bg-slate-900 flex items-center justify-center overflow-hidden">
-                                <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=Brian" alt="Avatar" />
-                            </div>
-                        </div>
-                    </div>
-                </header>
+                {activeTab === 'members' && (
+                    <>
+                        <StatsGrid
+                            realStats={realStats}
+                            filterType={filterType}
+                            setFilterType={setFilterType}
+                            setFilteredList={setFilteredList}
+                            memberList={memberList}
+                            settings={settings}
+                        />
 
-                {/* Stats Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
-                    {stats.map((stat, idx) => (
-                        <motion.div
-                            key={idx}
-                            initial={{ opacity: 0, y: 20 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: idx * 0.1 }}
-                            className="glass p-6 group cursor-pointer hover:bg-slate-800/50 transition-all"
-                        >
-                            <div className="flex justify-between items-start mb-4">
-                                <div
-                                    className="p-3 rounded-xl"
-                                    style={{ backgroundColor: `${stat.color}20`, color: stat.color }}
-                                >
-                                    <stat.icon size={24} />
-                                </div>
-                                <span className="text-emerald-500 text-xs font-bold">+12%</span>
-                            </div>
-                            <p className="text-slate-400 text-sm font-medium">{stat.label}</p>
-                            <h3 className="text-2xl font-bold mt-1">{stat.value}</h3>
-                        </motion.div>
-                    ))}
-                </div>
+                        <MemberTable
+                            filterType={filterType}
+                            filteredList={filteredList}
+                            memberList={memberList}
+                            setFilterType={setFilterType}
+                            setFilteredList={setFilteredList}
+                            selectedIds={selectedIds}
+                            setSelectedIds={setSelectedIds}
+                            colFilters={colFilters}
+                            setColFilters={setColFilters}
+                            activeColFilter={activeColFilter}
+                            setActiveColFilter={setActiveColFilter}
+                            sortConfig={sortConfig}
+                            setSortConfig={setSortConfig}
+                            isLoading={isLoading}
+                            setSelectedMember={setSelectedMember}
+                            settings={settings}
+                        />
+                    </>
+                )}
 
-                {/* Table/List Preview */}
-                <section className="glass p-8">
-                    <div className="flex justify-between items-center mb-6">
-                        <h3 className="text-xl font-bold">최근 활동 회원</h3>
-                        <button className="text-sm font-semibold text-emerald-400 hover:text-emerald-300">전체 보기</button>
-                    </div>
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-left">
-                            <thead>
-                                <tr className="text-slate-500 text-sm border-b border-slate-800">
-                                    <th className="pb-4 font-semibold">회원명</th>
-                                    <th className="pb-4 font-semibold">프로그램</th>
-                                    <th className="pb-4 font-semibold">참여일</th>
-                                    <th className="pb-4 font-semibold">상태</th>
-                                    <th className="pb-4 font-semibold text-right">관리</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-800/50">
-                                {[
-                                    { name: '김현존', program: '심화 명상 세션', date: '2026.02.18', status: '참가중', color: '#10b981' },
-                                    { name: '이정적', program: '기초 입문 과정', date: '2026.02.18', status: '완료', color: '#3b82f6' },
-                                    { name: '박고요', program: '개별 1:1 상담', date: '2026.02.17', status: '대기', color: '#f59e0b' }
-                                ].map((member, i) => (
-                                    <tr key={i} className="group hover:bg-slate-800/30 transition-colors">
-                                        <td className="py-4">
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-8 h-8 rounded-full bg-slate-700"></div>
-                                                <span className="font-semibold">{member.name}</span>
-                                            </div>
-                                        </td>
-                                        <td className="py-4 text-slate-300">{member.program}</td>
-                                        <td className="py-4 text-slate-400 text-sm">{member.date}</td>
-                                        <td className="py-4">
-                                            <span
-                                                className="px-3 py-1 rounded-full text-xs font-bold"
-                                                style={{ backgroundColor: `${member.color}20`, color: member.color }}
-                                            >
-                                                {member.status}
-                                            </span>
-                                        </td>
-                                        <td className="py-4 text-right">
-                                            <button className="text-slate-500 hover:text-white transition-colors">상세</button>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </section>
+                {activeTab === 'add' && (
+                    <AddMemberView
+                        newMember={newMember}
+                        setNewMember={setNewMember}
+                        handleAddNewMember={handleAddNewMember}
+                        isLoading={isLoading}
+                    />
+                )}
+
+                {activeTab === 'sms' && (
+                    <SMSView
+                        filteredList={filteredList}
+                        selectedIds={selectedIds}
+                        smsLogs={smsLogs}
+                        fetchSmsHistory={fetchSmsHistory}
+                        setIsSmsOpen={setIsSmsOpen}
+                    />
+                )}
+
+                {activeTab === 'settings' && (
+                    <SettingsView
+                        settings={settings}
+                        setSettings={setSettings}
+                    />
+                )}
+
+                {activeTab === 'stats' && (
+                    <StatsView
+                        realStats={realStats}
+                        memberList={memberList}
+                    />
+                )}
+
+                {activeTab === 'attendance' && (
+                    <AttendanceView
+                        attendanceSearch={attendanceSearch}
+                        handleAttendanceSearch={handleAttendanceSearch}
+                        attendanceSearchResults={attendanceSearchResults}
+                        handleAttendanceRecord={handleAttendanceRecord}
+                        todayAttendance={todayAttendance}
+                    />
+                )}
             </main>
 
+            {/* Modals & Overlays */}
+            <AnimatePresence>
+                {isNotifyOpen && (
+                    <NotificationModal
+                        memberList={memberList}
+                        setIsNotifyOpen={setIsNotifyOpen}
+                        setSelectedMember={setSelectedMember}
+                        setIsSmsOpen={setIsSmsOpen}
+                    />
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {selectedIds.size > 0 && (
+                    <BulkActionBar
+                        selectedIds={selectedIds}
+                        setSelectedIds={setSelectedIds}
+                        setIsSmsOpen={setIsSmsOpen}
+                    />
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {selectedMember && (
+                    <MemberDetailModal
+                        selectedMember={selectedMember}
+                        setSelectedMember={setSelectedMember}
+                        isEditingMember={isEditingMember}
+                        setIsEditingMember={setIsEditingMember}
+                        editForm={editForm}
+                        setEditForm={setEditForm}
+                        handleUpdateMember={handleUpdateMember}
+                        handleDeleteMember={handleDeleteMember}
+                        setIsSmsOpen={setIsSmsOpen}
+                        isLoading={isLoading}
+                        settings={settings}
+                    />
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {isSmsOpen && (
+                    <SMSModal
+                        isSmsOpen={isSmsOpen}
+                        setIsSmsOpen={setIsSmsOpen}
+                        selectedMember={selectedMember}
+                        selectedIds={selectedIds}
+                        filteredList={filteredList}
+                        smsMessage={smsMessage}
+                        setSmsMessage={setSmsMessage}
+                        handleSendSms={handleSendSms}
+                        isSendingSms={isSendingSms}
+                    />
+                )}
+            </AnimatePresence>
+
+            {/* Bottom Navigation for Mobile */}
+            {settings.mobileNavStyle === 'bottom' && (
+                <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} />
+            )}
+
+            {/* Custom Styles */}
             <style dangerouslySetInnerHTML={{
                 __html: `
         /* Tailwind-like utilities for quick prototype */
@@ -228,7 +532,20 @@ const App = () => {
         .top-1/2 { top: 50%; }
         .-translate-y-1/2 { transform: translateY(-50%); }
         .grid { display: grid; }
-        .grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+        .z-40 { z-index: 40; }
+        .z-50 { z-index: 50; }
+        .fixed { position: fixed; }
+        .bottom-6 { bottom: 1.5rem; }
+        .right-6 { right: 1.5rem; }
+        .hidden { display: none; }
+        @media (min-width: 640px) { .sm\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (min-width: 1024px) { 
+            .lg\\:flex { display: flex; }
+            .lg\\:relative { position: relative; }
+            .lg\\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+            .lg\\:p-8 { padding: 2rem; }
+        }
       ` }} />
         </div>
     );
